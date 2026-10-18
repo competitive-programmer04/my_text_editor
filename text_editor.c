@@ -1,0 +1,408 @@
+#include<unistd.h>
+#include<termios.h>
+#include<stdlib.h>
+#include<stdio.h>
+#include<errno.h>
+#include<sys/ioctl.h>
+#include<string.h>
+
+#define Ctrl(k) ((k)&0x1F)
+const char *TEXOR_VER = "0.0.1";
+
+typedef struct EditorConfig{
+    int x_pos; // column position
+    int y_pos; // row position
+    int screenRows;
+    int screenColumns;
+    struct termios orig_mode;
+}EditorConfig;
+
+EditorConfig E;
+
+typedef struct ap_str{
+    char *ptr;
+    size_t len;
+}ap_str;
+
+#define AS_INIT {NULL, 0}
+
+enum{
+    ARROW_UP = 1000,
+    ARROW_DOWN,
+    ARROW_LEFT,
+    ARROW_RIGHT,
+    PAGE_UP,
+    PAGE_DOWN,
+    HOME_KY,
+    END_KY,
+    DEL_KY,
+};
+
+int append_string_alloc(ap_str *as, const char *str, size_t len){
+    char *new_ptr = realloc(as->ptr, as->len + len);
+    if(new_ptr == NULL){
+        return -1;
+    }
+    as->ptr = new_ptr;
+    memcpy(as->ptr + as->len, str, len);
+    as->len = as->len + len;
+    return 0;
+}
+
+void append_string_free(ap_str *as){
+    free(as->ptr);
+    as->len = 0;
+    return;
+}
+
+void handle_error(const char *s){
+    write(STDOUT_FILENO, "\x1b[2J", 4);
+    write(STDOUT_FILENO, "\x1b[1;1H", 6);
+    perror(s);
+    exit(1);
+}
+
+void disableRawMode(){
+    if(tcsetattr(STDIN_FILENO, TCSAFLUSH, &E.orig_mode) == -1){ // TCSAFLUSH -> discard any left over characters in stdin and stout 
+        handle_error("tcsetattr");
+    }
+    return;
+}
+
+void enableRawMode(){
+    if(tcgetattr(STDIN_FILENO, &E.orig_mode) == -1){
+        handle_error("tcgetattr");
+    }
+    struct termios raw_mode = E.orig_mode;
+    raw_mode.c_lflag &= ~(ECHO | ICANON | ISIG | IEXTEN);
+    /*
+     ECHO -> to turn off echo mode
+     ICANON -> to turn of canonical mode
+     ISIG -> to handle ctrl-c and ctrl-z
+     IEXTEN -> to handle ctrl-v
+     */
+    raw_mode.c_iflag &= ~(IXON | ICRNL | BRKINT | INPCK | ISTRIP);
+    /*
+     IXON -> to handle ctrl-s and ctrl-q
+     ICRNL -> to handle ctrl-m
+     BRKINT, INPCK, ISTRIP -> miscellaneous flags
+     */
+    raw_mode.c_oflag &= ~(OPOST);
+    /*
+     OPOST -> turn of so \n will remain \n not treated as \r\n
+     */
+    raw_mode.c_cflag &= ~(CS8);
+    /*
+     CS8 -> turn off so the maximum size of character remains 8 bits 1 byte
+     */
+    raw_mode.c_cc[VMIN] = 0;
+    raw_mode.c_cc[VTIME] = 1;
+    /*
+     VMIN -> minimum number of bytes taken as input before returning from read
+     VTIME -> maximum amount of time taken by read to return
+     VTIME is in 1/10 of a second
+     */
+    if(tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw_mode) == -1){
+        handle_error("tcsetattr");
+    }
+    return;
+}
+
+int getCursorPosition(int *rows, int *cols){
+    if(write(STDOUT_FILENO, "\x1b[6n", 4) != 4) return -1; // n command is used to query terminal to get the status information and 
+                                                           // 6 is the argument to get the current cursor position
+    char cur_pos[32];
+    size_t i=0;
+    while(i<sizeof(cur_pos)-1 && read(STDIN_FILENO, &cur_pos[i], 1) == 1){
+        if(cur_pos[i] == 'R'){
+            break;
+        }
+        i++;
+    }
+    cur_pos[i] = '\0';
+    if(cur_pos[0] != '\x1b' || cur_pos[1] != '[') return -1;
+    if(sscanf(&cur_pos[2] , "%d:%d", rows, cols) != 2) return -1;
+    return 0;
+}
+
+int getWindowSize(int *rows, int *cols){
+    struct winsize ws;
+    if(ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) == -1 || ws.ws_col == 0 || ws.ws_row == 0){
+        if(write(STDOUT_FILENO, "\x1b[999C\x1b[999B", 12) != 12) return -1;
+        if(getCursorPosition(rows, cols) == -1) return -1;
+    }
+    *rows = ws.ws_row;
+    *cols = ws.ws_col;
+    return 0;
+}
+
+void editorDrawRows(ap_str *as){
+    for(int i=0; i<E.screenRows; ++i){
+        append_string_alloc(as, "\x1b[K", 3); // ersases the line
+        if(i == E.screenRows/3){
+            char welcome_msg[80];
+            int welcome_len = snprintf(welcome_msg, sizeof(welcome_msg), "Welcome to Texor version: %s\r\n", TEXOR_VER);
+            if(welcome_len >= E.screenColumns) welcome_len = E.screenColumns;
+            int padding = (E.screenColumns - welcome_len)/2;
+            if(padding){
+                append_string_alloc(as, "~", 1);
+            }
+            while(padding--) append_string_alloc(as, " ", 1);
+            append_string_alloc(as, welcome_msg, welcome_len);
+        }
+        else if(i<E.screenRows-1){
+            append_string_alloc(as, "~\r\n", 3);
+        }
+        else if(i == E.screenRows-1){
+            append_string_alloc(as, "~", 1);
+        }
+    }
+    return;
+}
+
+void editorRefreshScreen(){
+    ap_str as = AS_INIT;
+    append_string_alloc(&as, "\x1b[?25l", 6); // ?25l -> hiding the cursor
+    append_string_alloc(&as, "\x1b[1;1H", 6); // moving the cursor to top position
+    editorDrawRows(&as);
+    char pos_buf[32];
+    snprintf(pos_buf, sizeof(pos_buf), "\x1b[%d;%dH", E.y_pos+2, E.x_pos+2);
+    append_string_alloc(&as, pos_buf, strlen(pos_buf));
+    append_string_alloc(&as, "\x1b[?25h", 6); // ?25h -> making the cursor visible again
+    write(STDOUT_FILENO, as.ptr, as.len);
+    append_string_free(&as);
+    return;
+}
+
+void editorMoveCursor(int c){
+    switch(c){
+        case ARROW_UP:{
+                     //up
+                     if(E.y_pos > 0){
+                         E.y_pos--;
+                     }
+                     break;
+                 }
+        case ARROW_RIGHT:{
+                     // right
+                     if(E.x_pos < E.screenColumns-1){
+                         E.x_pos++;
+                     }
+                     break;
+                 }
+        case ARROW_DOWN:{
+                     // down
+                     if(E.y_pos < E.screenRows-1){
+                         E.y_pos++;
+                     }
+                     break;
+                 }
+        case ARROW_LEFT:{
+                     // left
+                     if(E.x_pos > 0){
+                         E.x_pos--;
+                     }
+                     break;
+                 }
+    }
+    return;
+}
+
+int editorReadKey(){
+    ssize_t bytes_read;
+    char c;
+    while((bytes_read = read(STDIN_FILENO, &c, 1)) != 1){
+        if(bytes_read == -1 && errno != EAGAIN){
+            handle_error("read");
+        }
+    }
+    if(c == '\x1b'){
+        char seq[3];
+        if(read(STDIN_FILENO, &seq[0], 1) != 1) return '\x1b';
+        if(read(STDIN_FILENO, &seq[1], 1) != 1) return '\x1b';
+        if(seq[0] == '['){
+            if(seq[1] >= '0' && seq[1] <= '9'){
+                if(read(STDIN_FILENO, &seq[2], 1) != 1) return '\x1b';
+                if(seq[2] == '~'){
+                    switch(seq[1]){
+                        case '5':{
+                                     return PAGE_UP;
+                                 }
+                        case '6':{
+                                     return PAGE_DOWN;
+                                 }
+                        case '1':{
+                                     return HOME_KY;
+                                 }
+                        case '7':{
+                                     return HOME_KY;
+                                 }
+                        case '4':{
+                                     return END_KY;
+                                 }
+                        case '8':{
+                                     return END_KY;
+                                 }
+                        case '3':{
+                                     return DEL_KY;
+                                 }
+                        default:{
+                                    return '\x1b';
+                                }
+                    }
+                }
+                else{
+                    return '\x1b';
+                }
+            }
+            else{
+                switch(seq[1]){
+                    case 'A':{
+                                 return ARROW_UP;
+                             }
+                    case 'B':{
+                                 return ARROW_DOWN;
+                             }
+                    case 'C':{
+                                 return ARROW_RIGHT;
+                             }
+                    case 'D':{
+                                 return ARROW_LEFT;
+                             }
+                    case 'H':{
+                                 return HOME_KY;
+                             }
+                    case 'F':{
+                                 return END_KY;
+                             }
+                    default:{
+                                return '\x1b';
+                            }
+                }
+            }
+        }
+        else if(seq[0] == 'O'){
+            switch(seq[1]){
+                case 'H':{
+                             return HOME_KY;
+                         }
+                case 'F':{
+                             return END_KY;
+                         }
+                default:{
+                            return '\x1b';
+                        }
+            }
+        }
+        else{
+            return '\x1b';
+        }
+    }
+    else{
+        return c;
+    }
+}
+
+void editorProcessKey(){
+    int c = editorReadKey();
+    switch (c){
+        case Ctrl('q'):{
+                           write(STDOUT_FILENO, "\x1b[2J", 4);
+                           write(STDOUT_FILENO, "\x1b[1;1H", 6);
+                           exit(0);
+                           break;
+                     }
+        case ARROW_UP:{
+                     editorMoveCursor(c);
+                     break;
+                 }
+        case ARROW_DOWN:{
+                     editorMoveCursor(c);
+                     break;
+                 }
+        case ARROW_RIGHT:{
+                     editorMoveCursor(c);
+                     break;
+                 }
+        case ARROW_LEFT:{
+                     editorMoveCursor(c);
+                     break;
+                 }
+        case PAGE_UP:{
+                         int mov_times = E.screenRows;
+                         while(mov_times-- && E.y_pos > 0){
+                             editorMoveCursor(ARROW_UP);
+                         }
+                         break;
+                     }
+        case PAGE_DOWN:{
+                           int mov_times = E.screenRows;
+                           while(mov_times-- && E.y_pos < E.screenRows - 1){
+                               editorMoveCursor(ARROW_DOWN);
+                           }
+                           break;
+                       }
+        case HOME_KY:{
+                         E.x_pos = 0;
+                         break;
+                     }
+        case END_KY:{
+                        E.x_pos = E.screenRows - 1;
+                        break;
+                    }
+
+    }
+    return;
+}
+
+void initEditor(){
+    E.x_pos = 0;
+    E.y_pos = 0;
+    int res = getWindowSize(&E.screenRows, &E.screenColumns);
+    if(res == -1){
+        handle_error("get terminal size:");
+    }
+    return;
+}
+
+int main(){
+    enableRawMode();
+    initEditor();
+    while(1){
+      editorRefreshScreen();
+      editorProcessKey(); 
+    }
+    atexit(disableRawMode);
+    return 0;
+    /*
+     escape sequences that I learn so far
+     "\x1b[J" -> it clears off the screen. Arguments can
+     0 -> It is by default. It clears off the screen from the cursor to the end
+     1 -> It clears off the screen from the starting to the cursor
+     2 -> It clears off the entire screen
+
+     "\x1[y;xH" -> It moves the cursor to the yth row and xth column but it don't take care of whether the cursor is going out off the screen or not
+     "\x1b[K" -> It erases a line. Arguments can
+     0 -> It is by default. It deletes the line from the cursor to the end
+     1 -> It deletes the line from the beginning to the cursor
+     2 -> It deletes the entire line
+
+     "\x1b[?25l" -> It hides the cursor
+     "\x1b[?25h" -> It makes the cursor visible again
+     "\x1b[xC" -> It moves the cursor x units right
+     "\x1b[yB" -> It moves the cursor y units down
+     both B and C take care that cursor should not go out off the screen
+
+     "\x1b[n" -> It is used to query the terminal about status information. If the argument is 6 then it is used to find the current position of the cursor
+
+     "\x1b[A" -> ARROW UP
+     "\x1b[B" -> ARROW DOWN
+     "\x1b[C" -> ARROW RIGHT
+     "\x1b[D" -> ARROW LEFT
+     "\x1b[5~ -> PAGE UP
+     "\x1b[6~ -> PAGE DOWN
+     "\x1b[1~", "\x1b[7~", "|x1b[H", "\x1bOH" -> HOME KEY
+     "\x1b[4~", "\x1b[8~", \x1b[F", "\x1bOF" -> END KEY
+     "\x1b[3~", DELETE KEY
+     */
+}
