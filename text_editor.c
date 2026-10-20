@@ -1,3 +1,7 @@
+/* some flags for getline() */
+#define _BSD_SOURCE
+#define _GNU_SOURCE
+
 #include<unistd.h>
 #include<termios.h>
 #include<stdlib.h>
@@ -9,11 +13,18 @@
 #define Ctrl(k) ((k)&0x1F)
 const char *TEXOR_VER = "0.0.1";
 
+typedef struct editor_row{
+    int size;
+    char *str;
+}editor_row;
+
 typedef struct EditorConfig{
     int x_pos; // column position
     int y_pos; // row position
     int screenRows;
-    int screenColumns;
+    int  screenColumns;
+    int num_rows;
+    editor_row *erow;
     struct termios orig_mode;
 }EditorConfig;
 
@@ -74,7 +85,7 @@ void enableRawMode(){
         handle_error("tcgetattr");
     }
     struct termios raw_mode = E.orig_mode;
-    raw_mode.c_lflag &= ~(ECHO | ICANON | ISIG | IEXTEN);
+    raw_mode.c_lflag &= (ECHO | ICANON | ISIG | IEXTEN);
     /*
      ECHO -> to turn off echo mode
      ICANON -> to turn of canonical mode
@@ -136,10 +147,38 @@ int getWindowSize(int *rows, int *cols){
     return 0;
 }
 
+void editorAppendRow(char *str, int len){
+    E.erow = realloc(E.erow, sizeof(editor_row) * (E.num_rows+1));
+    E.erow[E.num_rows].size = len;
+    E.erow[E.num_rows].str = malloc(len+1);
+    memcpy(E.erow[E.num_rows].str, str, len);
+    E.erow[E.num_rows].str[len] = '\0';
+    return;
+}
+
+void editorOpen(char *file_path){
+    FILE *fp = fopen(file_path, "r");
+    if(fp != NULL){
+        char *line_buf = NULL;
+        size_t line_cap = 0;
+        int line_len = 0;
+        while((line_len = getline(&line_buf, &line_cap, fp)) != -1){
+            while(line_len >0 && (line_buf[line_len-1] == '\r' || line_buf[line_len-1] == '\n')) line_len--;
+            editorAppendRow(line_buf, line_len);
+            E.num_rows = E.num_rows + 1;
+        }
+        free(line_buf);
+        fclose(fp);
+    }
+    return;
+}
+
 void editorDrawRows(ap_str *as){
     for(int i=0; i<E.screenRows; ++i){
         append_string_alloc(as, "\x1b[K", 3); // ersases the line
-        if(i == E.screenRows/3){
+
+        // display the welcome message only when user opens the text editor without any file 
+        if(i == E.screenRows/3 && E.num_rows == 0){
             char welcome_msg[80];
             int welcome_len = snprintf(welcome_msg, sizeof(welcome_msg), "Welcome to Texor version: %s\r\n", TEXOR_VER);
             if(welcome_len >= E.screenColumns) welcome_len = E.screenColumns;
@@ -149,6 +188,12 @@ void editorDrawRows(ap_str *as){
             }
             while(padding--) append_string_alloc(as, " ", 1);
             append_string_alloc(as, welcome_msg, welcome_len);
+        }
+        else if(i<E.num_rows){
+            int len = E.erow[i].size;
+            if(len >= E.screenColumns) len = E.screenColumns;
+            append_string_alloc(as, E.erow[i].str, len);
+            append_string_alloc(as, "\r\n", 2);
         }
         else if(i<E.screenRows-1){
             append_string_alloc(as, "~\r\n", 3);
@@ -166,7 +211,7 @@ void editorRefreshScreen(){
     append_string_alloc(&as, "\x1b[1;1H", 6); // moving the cursor to top position
     editorDrawRows(&as);
     char pos_buf[32];
-    snprintf(pos_buf, sizeof(pos_buf), "\x1b[%d;%dH", E.y_pos+2, E.x_pos+2);
+    snprintf(pos_buf, sizeof(pos_buf), "\x1b[%d;%dH", E.y_pos+E.num_rows, E.x_pos+1);
     append_string_alloc(&as, pos_buf, strlen(pos_buf));
     append_string_alloc(&as, "\x1b[?25h", 6); // ?25h -> making the cursor visible again
     write(STDOUT_FILENO, as.ptr, as.len);
@@ -358,6 +403,8 @@ void editorProcessKey(){
 void initEditor(){
     E.x_pos = 0;
     E.y_pos = 0;
+    E.num_rows = 0;
+    E.erow = NULL;
     int res = getWindowSize(&E.screenRows, &E.screenColumns);
     if(res == -1){
         handle_error("get terminal size:");
@@ -365,9 +412,12 @@ void initEditor(){
     return;
 }
 
-int main(){
+int main(int argc, char *argv[]){
     enableRawMode();
     initEditor();
+    if(argc == 2){
+        editorOpen(argv[1]);
+    }
     while(1){
       editorRefreshScreen();
       editorProcessKey(); 
