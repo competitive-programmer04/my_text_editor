@@ -12,6 +12,8 @@
 
 #define Ctrl(k) ((k)&0x1F)
 const char *TEXOR_VER = "0.0.1";
+int SCROLL_UP = 0;
+int SCROLL_DOWN = 0;
 
 typedef struct editor_row{
     int size;
@@ -77,6 +79,7 @@ void disableRawMode(){
     if(tcsetattr(STDIN_FILENO, TCSAFLUSH, &E.orig_mode) == -1){ // TCSAFLUSH -> discard any left over characters in stdin and stout 
         handle_error("tcsetattr");
     }
+    printf("Number of rows: %d and number of columns: %d", E.screenRows, E.screenColumns);
     return;
 }
 
@@ -85,7 +88,7 @@ void enableRawMode(){
         handle_error("tcgetattr");
     }
     struct termios raw_mode = E.orig_mode;
-    raw_mode.c_lflag &= (ECHO | ICANON | ISIG | IEXTEN);
+    raw_mode.c_lflag &= ~(ECHO | ICANON | ISIG | IEXTEN);
     /*
      ECHO -> to turn off echo mode
      ICANON -> to turn of canonical mode
@@ -173,12 +176,98 @@ void editorOpen(char *file_path){
     return;
 }
 
-void editorDrawRows(ap_str *as){
+void str_rev(char *str, int len){
+    for(int i=0; i<len/2; ++i){
+        char temp = str[i];
+        str[i] = str[len-i-1];
+        str[len-i-1] = temp;
+    }
+    return;
+}
+/*
+void editorDrawLineNumber(ap_str *as){
+    int idx = 0;
+    int  len = 0;
+    char str[6];
+    for(int i=E.y_pos; i>1; --i){
+        append_string_alloc(as, "\x1b[K", 3);
+        memset(str, 0, 5);
+        idx = i;
+        len = 0;
+        while(idx > 0 && len < 5){
+            str[len] = (idx%10) + '0';
+            idx = idx/10;
+            len = len + 1;
+        }
+        str_rev(str, len);
+        str[len] = '\0';
+        append_string_alloc(as, str, len);
+        append_string_alloc(as, "\r\n", 2);
+    }
+    append_string_alloc(as, "\x1b[K", 3);
+    memset(str, 0, 5);
+    idx = 1;
+    len = 0;
+    while(idx>0 && len<5){
+        str[len] = (idx%10) + '0';
+        idx = idx/10;
+        len = len + 1;
+    }
+    str_rev(str, len);
+    str[len] = '\0';
+    append_string_alloc(as, str, len);
+    append_string_alloc(as, "\r\n", 2);
+    for(int i=2; i<=SCROLL_UP-(E.y_pos+1); ++i){
+        append_string_alloc(as, "\x1b[K", 3);
+        memset(str, 0, 5);
+        idx = i;
+        len = 0;
+        while(idx > 0 && len < 5){
+            str[len] = (idx%10) + '0';
+            idx = idx/10;
+            len = len + 1;
+        }
+        str_rev(str, len);
+        str[len] = '\0';
+        append_string_alloc(as, str, len);
+        if(i<SCROLL_UP-(E.y_pos-1)){
+            append_string_alloc(as, "\r\n", 2);
+        }
+    }
+    return;
+}
+*/
+
+void editorDrawText(ap_str *as){
+    char str_space[32];
+    for(int i=SCROLL_DOWN; i<SCROLL_UP; ++i){
+        snprintf(str_space, sizeof(str_space), "\x1b[%d;%dH", i, 5);
+        append_string_alloc(as, str_space, strlen(str_space));
+        append_string_alloc(as, "\x1b[K", 3);
+        int len = E.erow[i].size;
+        if(len >= E.screenColumns) len = E.screenColumns;
+        append_string_alloc(as, E.erow[i].str, len);
+        append_string_alloc(as, "\r\n", 2);
+    }
+    int idx = SCROLL_UP - SCROLL_DOWN;
+    for(int i=idx; i<E.screenRows; ++i){
+        append_string_alloc(as, "\x1b[K", 3);
+        if(i<E.screenRows-1){
+            append_string_alloc(as, "~\r\n", 3);
+        }
+        else if(i == E.screenRows-1){
+            append_string_alloc(as, "~", 1);
+        }
+    }
+    return;
+}
+
+void editorDrawName(ap_str *as){
     for(int i=0; i<E.screenRows; ++i){
         append_string_alloc(as, "\x1b[K", 3); // ersases the line
 
         // display the welcome message only when user opens the text editor without any file 
-        if(i == E.screenRows/3 && E.num_rows == 0){
+        if(i == E.screenRows/3){
             char welcome_msg[80];
             int welcome_len = snprintf(welcome_msg, sizeof(welcome_msg), "Welcome to Texor version: %s\r\n", TEXOR_VER);
             if(welcome_len >= E.screenColumns) welcome_len = E.screenColumns;
@@ -188,12 +277,6 @@ void editorDrawRows(ap_str *as){
             }
             while(padding--) append_string_alloc(as, " ", 1);
             append_string_alloc(as, welcome_msg, welcome_len);
-        }
-        else if(i<E.num_rows){
-            int len = E.erow[i].size;
-            if(len >= E.screenColumns) len = E.screenColumns;
-            append_string_alloc(as, E.erow[i].str, len);
-            append_string_alloc(as, "\r\n", 2);
         }
         else if(i<E.screenRows-1){
             append_string_alloc(as, "~\r\n", 3);
@@ -209,9 +292,16 @@ void editorRefreshScreen(){
     ap_str as = AS_INIT;
     append_string_alloc(&as, "\x1b[?25l", 6); // ?25l -> hiding the cursor
     append_string_alloc(&as, "\x1b[1;1H", 6); // moving the cursor to top position
-    editorDrawRows(&as);
+    if(E.num_rows == 0){
+        editorDrawName(&as);
+    }
+    else{
+        /*editorDrawLineNumber(&as);
+        append_string_alloc(&as, "\x1b[1;1H", 6);*/
+        editorDrawText(&as);
+    }
     char pos_buf[32];
-    snprintf(pos_buf, sizeof(pos_buf), "\x1b[%d;%dH", E.y_pos+E.num_rows, E.x_pos+1);
+    snprintf(pos_buf, sizeof(pos_buf), "\x1b[%d;%dH", E.y_pos, E.x_pos);
     append_string_alloc(&as, pos_buf, strlen(pos_buf));
     append_string_alloc(&as, "\x1b[?25h", 6); // ?25h -> making the cursor visible again
     write(STDOUT_FILENO, as.ptr, as.len);
@@ -223,28 +313,43 @@ void editorMoveCursor(int c){
     switch(c){
         case ARROW_UP:{
                      //up
-                     if(E.y_pos > 0){
+
+                          if(SCROLL_DOWN > 0){
+                              SCROLL_DOWN--;
+                          }
+                    if(SCROLL_UP - SCROLL_DOWN >= E.screenRows){
+                             SCROLL_UP--;
+                         }
+                     if(E.y_pos > 1){
                          E.y_pos--;
                      }
                      break;
                  }
         case ARROW_RIGHT:{
                      // right
-                     if(E.x_pos < E.screenColumns-1){
+                     if(E.x_pos < E.screenColumns){
                          E.x_pos++;
                      }
                      break;
                  }
         case ARROW_DOWN:{
                      // down
-                     if(E.y_pos < E.screenRows-1){
+                     if(E.y_pos == E.screenRows){
+                         if(SCROLL_UP < E.num_rows){
+                             SCROLL_UP++;
+                         }
+                         if(SCROLL_UP - SCROLL_DOWN >= E.screenRows){
+                             SCROLL_DOWN++;
+                         }
+                     }
+                     if(E.y_pos < E.screenRows){
                          E.y_pos++;
                      }
                      break;
                  }
         case ARROW_LEFT:{
                      // left
-                     if(E.x_pos > 0){
+                     if(E.x_pos > 1){
                          E.x_pos--;
                      }
                      break;
@@ -375,14 +480,14 @@ void editorProcessKey(){
                  }
         case PAGE_UP:{
                          int mov_times = E.screenRows;
-                         while(mov_times-- && E.y_pos > 0){
+                         while(mov_times-- && E.y_pos > 1){
                              editorMoveCursor(ARROW_UP);
                          }
                          break;
                      }
         case PAGE_DOWN:{
                            int mov_times = E.screenRows;
-                           while(mov_times-- && E.y_pos < E.screenRows - 1){
+                           while(mov_times-- && E.y_pos < E.screenRows){
                                editorMoveCursor(ARROW_DOWN);
                            }
                            break;
@@ -392,7 +497,7 @@ void editorProcessKey(){
                          break;
                      }
         case END_KY:{
-                        E.x_pos = E.screenRows - 1;
+                        E.x_pos = E.screenRows;
                         break;
                     }
 
@@ -401,8 +506,8 @@ void editorProcessKey(){
 }
 
 void initEditor(){
-    E.x_pos = 0;
-    E.y_pos = 0;
+    E.x_pos = 1;
+    E.y_pos = 1;
     E.num_rows = 0;
     E.erow = NULL;
     int res = getWindowSize(&E.screenRows, &E.screenColumns);
@@ -418,6 +523,7 @@ int main(int argc, char *argv[]){
     if(argc == 2){
         editorOpen(argv[1]);
     }
+    SCROLL_UP = E.num_rows <= E.screenRows ? E.num_rows : E.screenRows;
     while(1){
       editorRefreshScreen();
       editorProcessKey(); 
