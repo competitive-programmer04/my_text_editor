@@ -1,4 +1,4 @@
-/* some flags for getline() */
+/* some flags for getline*/
 #define _BSD_SOURCE
 #define _GNU_SOURCE
 
@@ -20,6 +20,8 @@ int SCROLL_RIGHT = 0;
 typedef struct editor_row{
     int size;
     char *str;
+    int rsize;
+    char *render;
 }editor_row;
 
 typedef struct EditorConfig{
@@ -40,6 +42,7 @@ typedef struct ap_str{
 }ap_str;
 
 #define AS_INIT {NULL, 0}
+#define TAB_SIZE 8
 
 enum{
     ARROW_UP = 1000,
@@ -80,7 +83,7 @@ void handle_error(const char *s){
 }
 
 void disableRawMode(){
-    if(tcsetattr(STDIN_FILENO, TCSAFLUSH, &E.orig_mode) == -1){ // TCSAFLUSH -> discard any left over characters in stdin and stout 
+    if(tcsetattr(STDIN_FILENO, TCSAFLUSH, &E.orig_mode) == -1){ // TCSAFLUSH -> discard any left over characters in stdin and stdout 
         handle_error("tcsetattr");
     }
    // printf("Number of rows: %d and number of columns: %d", E.screenRows, E.screenColumns);
@@ -123,6 +126,7 @@ void enableRawMode(){
     if(tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw_mode) == -1){
         handle_error("tcsetattr");
     }
+    atexit(disableRawMode);
     return;
 }
 
@@ -154,12 +158,41 @@ int getWindowSize(int *rows, int *cols){
     return 0;
 }
 
+void editorUpdateRow(editor_row *erow){
+    int num_tabs = 0;
+    for(int i=0; i<erow->size; ++i){
+        if(erow->str[i] == '\t'){
+            num_tabs++;
+        }
+    }
+    free(erow->render);
+    erow->render = malloc(erow->size + num_tabs*(TAB_SIZE-1) + 1); // 1 tab will occupy 8 bytes currently each tab is occupying 1 byte so we are adding 7 bytes more to every tab
+    int idx = 0;
+    for(int i=0; i<erow->size; ++i){
+        if(erow->str[i] == '\t'){
+            erow->render[idx++] = ' ';
+            while(idx % TAB_SIZE != 0) erow->render[idx++] = ' ';
+        }
+        else{
+            erow->render[idx++] = erow->str[i];
+        }
+    }
+    erow->render[idx] = '\0';
+    erow->rsize = idx;
+    return;
+}
+
 void editorAppendRow(char *str, int len){
     E.erow = realloc(E.erow, sizeof(editor_row) * (E.num_rows+1));
     E.erow[E.num_rows].size = len;
     E.erow[E.num_rows].str = malloc(len+1);
     memcpy(E.erow[E.num_rows].str, str, len);
     E.erow[E.num_rows].str[len] = '\0';
+    E.erow[E.num_rows].rsize = 0;
+    E.erow[E.num_rows].render = NULL;
+    editorUpdateRow(&E.erow[E.num_rows]);
+    free(E.erow[E.num_rows].str);
+    E.erow[E.num_rows].size = 0;
     return;
 }
 
@@ -249,9 +282,9 @@ void editorDrawText(ap_str *as){
         //snprintf(str_space, sizeof(str_space), "\x1b[%d;%dH", i, 5);
         //append_string_alloc(as, str_space, strlen(str_space));
         append_string_alloc(as, "\x1b[K", 3);
-        int len = E.erow[i].size;
+        int len = E.erow[i].rsize;
         if(len >= SCROLL_RIGHT) len = SCROLL_RIGHT;
-        append_string_alloc(as, E.erow[i].str + SCROLL_LEFT, len-SCROLL_LEFT);
+        append_string_alloc(as, E.erow[i].render + SCROLL_LEFT, len-SCROLL_LEFT);
         append_string_alloc(as, "\r\n", 2);
     }
     /*
@@ -336,7 +369,7 @@ void editorMoveCursor(int c){
         case ARROW_RIGHT:{
                      // right
                      if(E.x_pos == E.screenColumns){
-                         if(SCROLL_RIGHT < E.erow[(SCROLL_DOWN + E.y_pos)].size){
+                         if(SCROLL_RIGHT < E.erow[(SCROLL_DOWN + E.y_pos)].rsize){
                              SCROLL_RIGHT++;
                          }
                         if(SCROLL_RIGHT - SCROLL_LEFT > E.screenColumns){
@@ -504,24 +537,44 @@ void editorProcessKey(){
                  }
         case PAGE_UP:{
                          int mov_times = E.screenRows;
-                         while(mov_times-- && E.y_pos > 1){
-                             editorMoveCursor(ARROW_UP);
+                         while(mov_times--){
+                             if(SCROLL_DOWN > 0){
+                                 SCROLL_DOWN--;
+                             }
+                             if(SCROLL_UP - SCROLL_DOWN > E.screenRows){
+                                 SCROLL_UP--;
+                             }
+                             if(E.y_pos > 1){
+                                 editorMoveCursor(ARROW_UP);
+                             }
                          }
                          break;
                      }
         case PAGE_DOWN:{
                            int mov_times = E.screenRows;
-                           while(mov_times-- && E.y_pos < E.screenRows){
-                               editorMoveCursor(ARROW_DOWN);
+                           while(mov_times--){
+                               if(SCROLL_UP < E.num_rows){
+                                   SCROLL_UP++;
+                               }
+                               if(SCROLL_UP - SCROLL_DOWN > E.screenRows){
+                                   SCROLL_DOWN++;
+                               }
+                               if(E.y_pos < E.screenRows){
+                                   editorMoveCursor(ARROW_DOWN);
+                               }
                            }
                            break;
                        }
         case HOME_KY:{
                          E.x_pos = 0;
+                         SCROLL_RIGHT = E.screenColumns;
+                         SCROLL_LEFT = 0;
                          break;
                      }
         case END_KY:{
-                        E.x_pos = E.screenRows;
+                        E.x_pos = E.erow[(SCROLL_DOWN + E.y_pos)].rsize;
+                        SCROLL_RIGHT = E.erow[(SCROLL_DOWN + E.y_pos)].rsize > E.screenColumns ? E.erow[(SCROLL_DOWN + E.y_pos)].rsize : E.screenColumns;
+                        SCROLL_LEFT = SCROLL_RIGHT - E.screenColumns > 0 ? SCROLL_RIGHT - E.screenColumns : 0;
                         break;
                     }
 
@@ -553,7 +606,6 @@ int main(int argc, char *argv[]){
       editorRefreshScreen();
       editorProcessKey();
     }
-    atexit(disableRawMode);
     return 0;
     /*
      escape sequences that I learn so far
