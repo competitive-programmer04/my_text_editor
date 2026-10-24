@@ -57,15 +57,13 @@ enum{
 };
 
 int append_string_alloc(ap_str *as, const char *str, int len){
-    if(len > 0){
-        char *new_ptr = realloc(as->ptr, as->len + len);
-        if(new_ptr == NULL){
-            return -1;
-        }
-        as->ptr = new_ptr;
-        memcpy(as->ptr + as->len, str, len);
-        as->len = as->len + len;
+    char *new_ptr = realloc(as->ptr, as->len + len);
+    if(new_ptr == NULL){
+        return -1;
     }
+    as->ptr = new_ptr;
+    memcpy(as->ptr + as->len, str, len);
+    as->len = as->len + len;
     return 0;
 }
 
@@ -112,7 +110,7 @@ void enableRawMode(){
     /*
      OPOST -> turn of so \n will remain \n not treated as \r\n
      */
-    raw_mode.c_cflag &= ~(CS8);
+    raw_mode.c_cflag |= (CS8);
     /*
      CS8 -> turn off so the maximum size of character remains 8 bits 1 byte
      */
@@ -143,7 +141,7 @@ int getCursorPosition(int *rows, int *cols){
     }
     cur_pos[i] = '\0';
     if(cur_pos[0] != '\x1b' || cur_pos[1] != '[') return -1;
-    if(sscanf(&cur_pos[2] , "%d:%d", rows, cols) != 2) return -1;
+    if(sscanf(&cur_pos[2] , "%d;%d", rows, cols) != 2) return -1;
     return 0;
 }
 
@@ -191,8 +189,6 @@ void editorAppendRow(char *str, int len){
     E.erow[E.num_rows].rsize = 0;
     E.erow[E.num_rows].render = NULL;
     editorUpdateRow(&E.erow[E.num_rows]);
-    free(E.erow[E.num_rows].str);
-    E.erow[E.num_rows].size = 0;
     return;
 }
 
@@ -284,8 +280,12 @@ void editorDrawText(ap_str *as){
         append_string_alloc(as, "\x1b[K", 3);
         int len = E.erow[i].rsize;
         if(len >= SCROLL_RIGHT) len = SCROLL_RIGHT;
-        append_string_alloc(as, E.erow[i].render + SCROLL_LEFT, len-SCROLL_LEFT);
-        append_string_alloc(as, "\r\n", 2);
+        if(len > SCROLL_LEFT){
+            append_string_alloc(as, E.erow[i].render + SCROLL_LEFT, len-SCROLL_LEFT);
+        }
+        if(i < SCROLL_UP - 1){
+            append_string_alloc(as, "\r\n", 2);
+        }
     }
     /*
     int idx = SCROLL_UP - SCROLL_DOWN;
@@ -369,14 +369,14 @@ void editorMoveCursor(int c){
         case ARROW_RIGHT:{
                      // right
                      if(E.x_pos == E.screenColumns){
-                         if(SCROLL_RIGHT < E.erow[(SCROLL_DOWN + E.y_pos)].rsize){
+                         if(SCROLL_RIGHT < E.erow[(SCROLL_DOWN + E.y_pos) - 1].rsize){
                              SCROLL_RIGHT++;
                          }
                         if(SCROLL_RIGHT - SCROLL_LEFT > E.screenColumns){
                              SCROLL_LEFT++;
                          }
                      }
-                     if(E.x_pos < E.screenColumns){
+                     if(E.x_pos < E.screenColumns && E.x_pos < E.erow[(SCROLL_DOWN + E.y_pos) - 1].rsize){
                          E.x_pos++;
                      }
                      break;
@@ -391,7 +391,7 @@ void editorMoveCursor(int c){
                              SCROLL_DOWN++;
                          }
                      }
-                     if(E.y_pos < E.screenRows){
+                     if(E.y_pos < E.screenRows && E.y_pos < E.num_rows){
                          E.y_pos++;
                      }
                      break;
@@ -566,14 +566,14 @@ void editorProcessKey(){
                            break;
                        }
         case HOME_KY:{
-                         E.x_pos = 0;
+                         E.x_pos = 1;
                          SCROLL_RIGHT = E.screenColumns;
                          SCROLL_LEFT = 0;
                          break;
                      }
         case END_KY:{
-                        E.x_pos = E.erow[(SCROLL_DOWN + E.y_pos)].rsize;
-                        SCROLL_RIGHT = E.erow[(SCROLL_DOWN + E.y_pos)].rsize > E.screenColumns ? E.erow[(SCROLL_DOWN + E.y_pos)].rsize : E.screenColumns;
+                        E.x_pos = E.erow[(SCROLL_DOWN + E.y_pos) - 1].rsize;
+                        SCROLL_RIGHT = E.erow[(SCROLL_DOWN + E.y_pos)-1].rsize > E.screenColumns ? E.erow[(SCROLL_DOWN + E.y_pos)-1].rsize : E.screenColumns;
                         SCROLL_LEFT = SCROLL_RIGHT - E.screenColumns > 0 ? SCROLL_RIGHT - E.screenColumns : 0;
                         break;
                     }
