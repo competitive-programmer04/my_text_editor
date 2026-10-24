@@ -9,6 +9,8 @@
 #include<errno.h>
 #include<sys/ioctl.h>
 #include<string.h>
+#include<time.h>
+#include<stdarg.h>
 
 #define Ctrl(k) ((k)&0x1F)
 const char *TEXOR_VER = "0.0.1";
@@ -31,6 +33,9 @@ typedef struct EditorConfig{
     int  screenColumns;
     int num_rows;
     editor_row *erow;
+    char *file_name;
+    char message_status[80];
+    time_t status_msgt_time;
     struct termios orig_mode;
 }EditorConfig;
 
@@ -193,6 +198,8 @@ void editorAppendRow(char *str, int len){
 }
 
 void editorOpen(char *file_path){
+    free(E.file_name);
+    E.file_name = strdup(file_path);
     FILE *fp = fopen(file_path, "r");
     if(fp != NULL){
         char *line_buf = NULL;
@@ -272,6 +279,48 @@ void editorDrawLineNumber(ap_str *as){
 }
 */
 
+void editorDrawStatusBar(ap_str *as){
+    append_string_alloc(as, "\x1b[7m", 4); // \x1b[7m -> for inverting the color of status bar wrt to background
+    char status[80];
+    char row_column_status[80];
+    int len = snprintf(status, sizeof(status), "%.20s - %d", E.file_name ? E.file_name : "[No Name]", E.num_rows);
+    int rc_len = snprintf(row_column_status, sizeof(row_column_status), "%d, %d", SCROLL_DOWN + E.y_pos, SCROLL_LEFT + E.x_pos);
+    if(len >= E.screenColumns) len = E.screenColumns;
+    append_string_alloc(as, status, len);
+    while(len < E.screenColumns){
+        if(E.screenColumns - len == rc_len){
+            append_string_alloc(as, row_column_status, rc_len);
+            break;
+        }
+        else{
+            append_string_alloc(as, " ", 1);
+        }
+        len++;
+    }
+    append_string_alloc(as, "\x1b[m", 3);
+    append_string_alloc(as, "\r\n", 2);
+    return;
+}
+
+void editorSetStatusMessage(char *fmt, ...){
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(E.message_status, sizeof(E.message_status), fmt, ap);
+    va_end(ap);
+    E.status_msgt_time = time(NULL);
+    return;
+}
+
+void editorDrawMessageBar(ap_str *as){
+    append_string_alloc(as, "\x1b[K", 3);
+    int msglen = strlen(E.message_status);
+    if(msglen >= E.screenColumns) msglen = E.screenColumns;
+    if(msglen && time(NULL) - E.status_msgt_time < 5){
+        append_string_alloc(as, E.message_status, msglen);
+    }
+    return;
+}
+
 void editorDrawText(ap_str *as){
     //char str_space[32];
     for(int i=SCROLL_DOWN; i<SCROLL_UP; ++i){
@@ -283,10 +332,13 @@ void editorDrawText(ap_str *as){
         if(len > SCROLL_LEFT){
             append_string_alloc(as, E.erow[i].render + SCROLL_LEFT, len-SCROLL_LEFT);
         }
-        if(i < SCROLL_UP - 1){
-            append_string_alloc(as, "\r\n", 2);
-        }
+        append_string_alloc(as, "\r\n", 2);
     }
+    for(int i=SCROLL_UP+1; i<=E.screenRows; ++i){
+        append_string_alloc(as, "\r\n", 2);
+    }
+    editorDrawStatusBar(as);
+    editorDrawMessageBar(as);
     /*
     int idx = SCROLL_UP - SCROLL_DOWN;
     for(int i=idx; i<E.screenRows; ++i){
@@ -318,13 +370,15 @@ void editorDrawName(ap_str *as){
             while(padding--) append_string_alloc(as, " ", 1);
             append_string_alloc(as, welcome_msg, welcome_len);
         }
-        else if(i<E.screenRows-1){
-            append_string_alloc(as, "~\r\n", 3);
-        }
+        append_string_alloc(as, "~\r\n", 3);
+        /*
         else if(i == E.screenRows-1){
             append_string_alloc(as, "~", 1);
         }
+        */
     }
+    editorDrawStatusBar(as);
+    editorDrawMessageBar(as);
     return;
 }
 
@@ -559,7 +613,7 @@ void editorProcessKey(){
                                if(SCROLL_UP - SCROLL_DOWN > E.screenRows){
                                    SCROLL_DOWN++;
                                }
-                               if(E.y_pos < E.screenRows){
+                               if(E.y_pos < E.screenRows && E.y_pos < E.num_rows){
                                    editorMoveCursor(ARROW_DOWN);
                                }
                            }
@@ -586,11 +640,15 @@ void initEditor(){
     E.x_pos = 1;
     E.y_pos = 1;
     E.num_rows = 0;
+    E.file_name = NULL;
+    E.message_status[0] = '\0';
+    E.status_msgt_time = 0;
     E.erow = NULL;
     int res = getWindowSize(&E.screenRows, &E.screenColumns);
     if(res == -1){
         handle_error("get terminal size:");
     }
+    E.screenRows = E.screenRows - 2;
     return;
 }
 
@@ -600,6 +658,7 @@ int main(int argc, char *argv[]){
     if(argc == 2){
         editorOpen(argv[1]);
     }
+    editorSetStatusMessage("HELP: Press Ctrl-q to quit the editor");
     SCROLL_UP = E.num_rows <= E.screenRows ? E.num_rows : E.screenRows;
     SCROLL_RIGHT = E.screenColumns;
     while(1){
@@ -637,5 +696,8 @@ int main(int argc, char *argv[]){
      "\x1b[1~", "\x1b[7~", "|x1b[H", "\x1bOH" -> HOME KEY
      "\x1b[4~", "\x1b[8~", \x1b[F", "\x1bOF" -> END KEY
      "\x1b[3~", DELETE KEY
+
+     \x1b[7m -> for inverting the color. If there is a white background then status bar will be shown black
+     \x1b[m -> for normal formating
      */
 }
